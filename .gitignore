@@ -1,6 +1,10 @@
 .env
+.env.*
+!.env.sample
+.playwright-mcp/
 
 node_modules/
+.npm-cfs/
 .next/
 tsconfig.tsbuildinfo
 .venv/

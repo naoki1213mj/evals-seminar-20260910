@@ -7,7 +7,8 @@
 ```text
 .
 ├── agent/                      # 第32回から流用したエージェント本体
-│   ├── agent.ts                # createDeepAgent定義(モデルはOpenRouter経由に変更)
+│   ├── agent.ts                # createDeepAgent定義
+│   ├── model-provider.ts       # OpenRouter / Foundryの設定・モデルクライアント
 │   ├── generate-pptx-tool.ts   # generate_pptxツール(スキーマ検証内蔵)
 │   ├── run-workspace.ts        # templateからrun workspaceを作成する共通処理
 │   ├── system-prompt.ts        # システムプロンプト
@@ -29,11 +30,13 @@
 ├── workspaces/                 # 読み取り専用のworkspace template
 │   ├── baseline/               # 機構のみのスキル
 │   ├── improvement-1/          # +スライド設計ガイド
-│   └── improvement-2/          # +保存前の事実確認
+│   ├── improvement-2/          # +保存前の事実確認
+│   └── improvement-3/          # 本フォークの追加実験: 数値・主張の根拠台帳
 ├── tmp/
 │   └── workspaces/             # 実行時に作られるrun workspace(Git管理外)
 ├── eval/
 │   ├── dataset.py              # Dataset行の組み立てと環境変数検証
+│   ├── model_config.py         # プロバイダー設定・モデル識別情報
 │   ├── publish_dataset.py      # 自分のprojectへDatasetをpublish
 │   ├── scorers.py              # 4つの品質軸のscorer
 │   ├── agent_model.py          # SlideAgentModelとsubprocess境界
@@ -54,10 +57,11 @@
 
 ```bash
 npm run check
+npm run test:agent
 uv run pytest
 ```
 
-`npm run check`はTypeScriptの型チェック、`uv run pytest`はPython側の単体テストです。単体テストはjudge LLMを呼ばず、litellm・プリセットscorer・subprocessをfakeへ差し替えています。
+`npm run check`はTypeScriptの型チェック、`npm run test:agent`はTypeScript側、`uv run pytest`はPython側の単体テストです。TypeScriptのテストはHTTP応答をfakeへ差し替えて両プロバイダーの通常・ストリーミング呼び出しとTraceのusageを扱います。Pythonのテストもjudge LLMを呼ばず、litellm・プリセットscorer・subprocessをfakeへ差し替えています。
 
 ## ワークスペースの構成
 
@@ -126,8 +130,22 @@ npm run agent -- 1706.03762 improvement-2
 
 Agent TraceはWeaveのcalls（Traces画面）とは別のagents planeに保存されます。`weave/agents/...`のconversation IDは`get_calls`では引けず、W&B Skillsの`wandb-primary`が持つ`weave_agent_ops.py`のようにagents向けのAPIで読みます。
 
-LLM spanにはOpenRouter応答のinput/output/reasoning/cache token usageを記録し、`gen_ai.usage.total_tokens`とOpenRouterが返す実課金値`openrouter.usage.cost`も保存します。Model出力の`conversation_id`（`<variant>:<thread_id>`形式）はAgents画面のconversation IDにも対応しています。
+LLM spanには応答に含まれるinput/output/reasoning/cache token usageと`gen_ai.usage.total_tokens`を記録します。プロバイダーはOpenRouterなら`openrouter`、Foundryなら`azure`として記録し、conversationの`model_provider`属性には設定値の`openrouter` / `foundry`を保存します。OpenRouterが返す実課金値`openrouter.usage.cost`はOpenRouter使用時のみ保存します。Model出力の`conversation_id`（`<variant>:<thread_id>`形式）はAgents画面のconversation IDにも対応しています。
 
 ## 環境変数
 
 `.env`は`eval/dataset.py`（Python）と`agent-run/cli.ts` / `agent-run/eval.ts`（TypeScript）がそれぞれ読みます。記録先は`WANDB_ENTITY`と`WANDB_PROJECT`（省略時は`evals-seminar-20260910`）から`<entity>/<project>`を組み立てます。`WANDB_ENTITY`が未設定か雛形のままなら、Python側はエラーで止まり、TypeScript側はAgent Traceを無効にして警告を出します。
+
+`LLM_PROVIDER`は`openrouter`（既定）または`foundry`です。モデルの設定は`.env`を読み込んだ後に解決し、使わないプロバイダーのAPIキーは要求しません。FoundryはAPIキー認証のOpenAI互換v1 Chat Completionsを使用し、プロジェクトエンドポイントではなくモデル推論エンドポイントを指定します。設定名と切り替え方法は[README](../README.md#microsoft-foundryを使用する場合)を参照してください。
+
+CLIの成果物と評価用`evaluation-result.json`には実際に使った`provider`と`model`も記録します。APIキーはWeaveのModel・scorerの公開フィールドやTrace属性へ含めません。
+
+評価開始時の接続設定はModelの非公開属性へ保持し、TypeScriptの子プロセスにも専用の環境変数として渡します。途中で親プロセスの設定が変わっても、採点側と生成側が別のプロバイダーを使わないためです。Weaveから復元したModelは、現在の接続設定と保存されたモデル識別情報が一致しない場合、実行せずエラーにします。
+
+PythonのプリセットscorerはWeave 0.53.6のプライベートな`_acompletion` callableへ、インスタンスごとの接続設定を渡すadapterを設定しています。プロンプトと採点ロジックはプリセットを維持し、`summarization` / `hallucination_free`という名前のclass-based wrapperでモデル・プロバイダー・endpointを記録します。APIキーを保持する接続情報は`PrivateAttr`に置き、Weaveへ保存される公開フィールドには含めません。Weaveの更新時にはこのadapterとプリセットの互換性も確認してください。
+
+## Linux ARM64のPython依存関係
+
+Linux ARM64では、CFSで配布されるCPU対応の`torch==2.9.1`を条件付きの制約として指定します。元の`torch==2.13.0`が要求する`nvidia-cusparselt-cu13==0.8.1`は、wheel内部のプラットフォーム表記が`manylinux2014_sbsa`となっており、uvが同一パッケージを繰り返し再インストール扱いにするためです。配布物のメタデータを書き換えたり、PyTorchの厳密な依存条件を無視したりせず、整合する依存構成を使用します。
+
+この制約はLinux ARM64にのみ適用します。本教材の4つの評価軸はクラウドLLMまたは決定的な処理を利用し、ローカルCUDA GPUは使用しません。ローカルGPU用のWeave scorerを追加する場合は、別途対応環境と依存関係を設計してください。

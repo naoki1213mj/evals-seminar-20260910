@@ -13,7 +13,7 @@ from dataset import DATASET_NAME, build_dataset_rows, load_settings
 
 
 def main() -> None:
-    settings = load_settings(require_openrouter=False)
+    settings = load_settings(require_model=False)
     weave.init(settings.weave_project)
 
     print("[info] ar5ivから論文本文を取得しています...")

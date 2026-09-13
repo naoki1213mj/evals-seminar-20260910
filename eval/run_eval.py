@@ -17,8 +17,13 @@ from typing import Any
 import weave
 from agent_model import SlideAgentModel
 from dataset import DATASET_NAME, VARIANTS, load_settings
+from model_config import ModelConfig, load_model_config
 from scorers import build_scorers
 from weave.flow.scorer import apply_scorer_async, get_scorer_attributes
+
+
+def safe_error_message(error: Exception, config: ModelConfig) -> str:
+    return f"{type(error).__name__}: {str(error).replace(config.api_key, '[redacted]')}"
 
 
 def build_eval_context(
@@ -52,10 +57,13 @@ async def apply_and_log_scorer(
         logged_score.value = result.result
 
 
-async def run_evaluation(*, variant: str, dataset: Any) -> tuple[str | None, int]:
+async def run_evaluation(
+    *, variant: str, dataset: Any, config: ModelConfig | None = None
+) -> tuple[str | None, int]:
     """EvaluationLoggerを使い、Dataset全行を1 trialずつ評価する。"""
-    model = SlideAgentModel(variant=variant)
-    scorers = build_scorers()
+    config = config or load_model_config()
+    model = SlideAgentModel.configured(variant=variant, config=config)
+    scorers = build_scorers(config)
     scorer_names = [
         get_scorer_attributes(scorer).scorer_name for scorer in scorers
     ]
@@ -103,11 +111,14 @@ async def run_evaluation(*, variant: str, dataset: Any) -> tuple[str | None, int
                             scorer_name = get_scorer_attributes(scorer).scorer_name
                             print(
                                 f"[scorer error] example={example_id} "
-                                f"scorer={scorer_name}: {error}"
+                                f"scorer={scorer_name}: {safe_error_message(error, config)}"
                             )
             except Exception as error:
                 errors += 1
-                print(f"[prediction error] example={example_id}: {error}")
+                print(
+                    f"[prediction error] example={example_id}: "
+                    f"{safe_error_message(error, config)}"
+                )
     except BaseException as error:
         eval_logger.fail(error)
         raise
@@ -122,7 +133,7 @@ def main() -> None:
     parser.add_argument("variant", choices=VARIANTS)
     args = parser.parse_args()
 
-    settings = load_settings(require_openrouter=True)
+    settings = load_settings(require_model=True)
     client = weave.init(settings.weave_project)
 
     # 設定形式にかかわらずrefを解決できるよう、initが解決した値を使う
@@ -139,11 +150,17 @@ def main() -> None:
         ) from error
 
     evaluation_url, errors = asyncio.run(
-        run_evaluation(variant=args.variant, dataset=dataset)
+        run_evaluation(
+            variant=args.variant, dataset=dataset, config=settings.model_config
+        )
     )
 
     print(f"[dataset] {dataset.ref.uri() if dataset.ref else dataset_uri}")
-    print(f"[model] variant={args.variant}")
+    config = settings.model_config
+    print(
+        f"[model] variant={args.variant} provider={config.provider} "
+        f"agent={config.agent_model} judge={config.judge_model}"
+    )
     if evaluation_url:
         print(f"[evaluation] {evaluation_url}")
     print(f"[errors] {errors}")

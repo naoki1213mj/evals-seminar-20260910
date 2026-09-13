@@ -9,55 +9,57 @@ import html as html_lib
 import os
 import re
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+from model_config import ModelConfig, is_placeholder, model_config_from_env
 
 ROOT = Path(__file__).resolve().parents[1]
 
 DATASET_NAME = "evals-seminar-20260910"
 PAPER_IDS = ["1706.03762", "2512.07828", "2603.03303"]
-VARIANTS = ["baseline", "improvement-1", "improvement-2"]
+VARIANTS = ["baseline", "improvement-1", "improvement-2", "improvement-3"]
 EXPECTED_TOOLS = ["execute", "generate_pptx"]
 MAX_SOURCE_CHARS = 120_000
 
 
 @dataclass(frozen=True)
 class Settings:
-    wandb_api_key: str
+    wandb_api_key: str = field(repr=False)
     weave_project: str
-    openrouter_api_key: str
+    model_config: ModelConfig | None = field(default=None, repr=False)
 
 
-def load_settings(*, require_openrouter: bool) -> Settings:
+def load_settings(*, require_model: bool) -> Settings:
     """`.env`を読み込み、評価に必要な環境変数を検証する。"""
     load_dotenv(ROOT / ".env", override=True)
     wandb_api_key = os.environ.get("WANDB_API_KEY", "").strip()
     wandb_entity = os.environ.get("WANDB_ENTITY", "").strip()
     wandb_project = os.environ.get("WANDB_PROJECT", "").strip()
-    if wandb_entity and wandb_entity != "your_wandb_entity_here":
+    if wandb_entity and not is_placeholder(wandb_entity):
         weave_project = f"{wandb_entity}/{wandb_project or DATASET_NAME}"
     else:
         weave_project = ""
-    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-
     missing = []
-    if not wandb_api_key:
+    if not wandb_api_key or is_placeholder(wandb_api_key):
         missing.append("WANDB_API_KEY")
     if not weave_project:
         missing.append("WANDB_ENTITY（必要ならWANDB_PROJECTも設定）")
-    if require_openrouter and not openrouter_api_key:
-        missing.append("OPENROUTER_API_KEY")
     if missing:
         raise SystemExit(
             "次の環境変数を.envへ設定してください: " + ", ".join(missing)
         )
 
+    try:
+        model_config = model_config_from_env(os.environ) if require_model else None
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+
     return Settings(
         wandb_api_key=wandb_api_key,
         weave_project=weave_project,
-        openrouter_api_key=openrouter_api_key,
+        model_config=model_config,
     )
 
 

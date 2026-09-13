@@ -5,22 +5,45 @@
 - hallucination_free: プリセットHallucinationFreeScorerへの移譲wrapper
 - slide_quality: 自作class-based scorer(weave.Scorer)
 
-LLM-as-a-judgeはlitellm経由で呼び、`openrouter/<provider>/<model>`形式の
-model_idでOpenRouterを使う。認証は.envのOPENROUTER_API_KEYをlitellmが読む。
+LLM-as-a-judgeはlitellm経由で選択したproviderを呼ぶ。認証とendpointは
+requestごとに渡し、認証情報はScorerの公開fieldには含めない。
+Foundryではdeployment名から基盤modelを推測せず、temperatureを省略し、
+プリセットのmax_tokensをmax_completion_tokensへ変換する。judge deploymentは
+プリセットのJSON Schema出力と、slide_qualityのJSON modeをサポートする必要がある。
 judge APIエラーは0点へ変換せず、そのままscorer errorとして伝播させる。
 """
 
 import json
+from typing import Any, Literal
 
 import litellm
 import weave
+from model_config import DEFAULT_JUDGE_MODEL, ModelConfig, load_model_config
+from pydantic import PrivateAttr
 from weave.scorers import HallucinationFreeScorer, SummarizationScorer
 
-JUDGE_MODEL = "openrouter/openai/gpt-5.4"
+JUDGE_MODEL = f"openrouter/{DEFAULT_JUDGE_MODEL}"
 
-# judgeの429/一時的なAPIエラーで行のscoreが欠けないよう、litellm全体に再試行を設定する。
-# プリセットscorer(SummarizationScorer / HallucinationFreeScorer)のlitellm呼び出しにも効く。
-litellm.num_retries = 3
+
+class _JudgeCompletion:
+    def __init__(self, config: ModelConfig):
+        self._config = config
+
+    async def __call__(self, **kwargs: Any) -> Any:
+        config = self._config
+        if config.provider == "foundry":
+            kwargs.pop("temperature", None)
+            if "max_tokens" in kwargs:
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        return await litellm.acompletion(
+            **{
+                **kwargs,
+                "model": config.judge_model_id,
+                "api_base": config.endpoint,
+                "api_key": config.api_key,
+                "num_retries": 3,
+            }
+        )
 
 
 def _slide_text_missing_result(output: dict) -> dict | None:
@@ -45,32 +68,29 @@ def tool_correctness(output: dict, expected_tools: list[str]) -> dict:
     }
 
 
-_summarization = SummarizationScorer(model_id=JUDGE_MODEL)
+class JudgeScorer(weave.Scorer):
+    provider: str
+    judge_model: str
+    endpoint: str
+    _completion: Any = PrivateAttr()
 
 
-@weave.op
-async def summarization(output: dict, source_text: str) -> dict:
-    failed = _slide_text_missing_result(output)
-    if failed is not None:
-        return failed
-    return await _summarization.score(
-        input=source_text,
-        output=output["slide_text"],
-    )
+class PresetJudgeScorer(JudgeScorer):
+    name: Literal["summarization", "hallucination_free"]
+    _preset: Any = PrivateAttr()
 
-
-_hallucination_free = HallucinationFreeScorer(model_id=JUDGE_MODEL)
-
-
-@weave.op
-async def hallucination_free(output: dict, source_text: str) -> dict:
-    failed = _slide_text_missing_result(output)
-    if failed is not None:
-        return failed
-    return await _hallucination_free.score(
-        context=source_text,
-        output=output["slide_text"],
-    )
+    @weave.op
+    async def score(self, output: dict, source_text: str) -> dict:
+        failed = _slide_text_missing_result(output)
+        if failed is not None:
+            return failed
+        if self.name == "summarization":
+            return await self._preset.score(
+                input=source_text, output=output["slide_text"]
+            )
+        return await self._preset.score(
+            context=source_text, output=output["slide_text"]
+        )
 
 
 # 旧eval/metrics.pyのG-Eval evaluation_stepsをそのまま採点基準として使い、
@@ -98,8 +118,7 @@ Evaluation Stepsに基づき、次の2つのキーを持つJSONだけを返し�
 """
 
 
-class SlideQualityScorer(weave.Scorer):
-    judge_model: str
+class SlideQualityScorer(JudgeScorer):
     prompt: str = SLIDE_QUALITY_PROMPT
     threshold: float = 0.5
 
@@ -108,7 +127,7 @@ class SlideQualityScorer(weave.Scorer):
         failed = _slide_text_missing_result(output)
         if failed is not None:
             return failed
-        response = await litellm.acompletion(
+        response = await self._completion(
             model=self.judge_model,
             messages=[
                 {
@@ -132,10 +151,28 @@ class SlideQualityScorer(weave.Scorer):
         }
 
 
-def build_scorers() -> list:
-    return [
-        tool_correctness,
-        summarization,
-        hallucination_free,
-        SlideQualityScorer(judge_model=JUDGE_MODEL),
-    ]
+def build_scorers(config: ModelConfig | None = None) -> list:
+    config = config or load_model_config()
+    completion = _JudgeCompletion(config)
+    metadata = {
+        "provider": config.provider,
+        "judge_model": config.judge_model_id,
+        "endpoint": config.endpoint,
+    }
+    scorers = [tool_correctness]
+    for name, preset_type in (
+        ("summarization", SummarizationScorer),
+        ("hallucination_free", HallucinationFreeScorer),
+    ):
+        preset = preset_type(model_id=config.judge_model_id)
+        # Weave 0.53.6 exposes no API-key/base-URL fields; its per-instance
+        # PrivateAttr callable lets us retain the preset's prompts and scoring.
+        preset._acompletion = completion
+        wrapper = PresetJudgeScorer(name=name, **metadata)
+        wrapper._completion = completion
+        wrapper._preset = preset
+        scorers.append(wrapper)
+    slide_quality = SlideQualityScorer(**metadata)
+    slide_quality._completion = completion
+    scorers.append(slide_quality)
+    return scorers

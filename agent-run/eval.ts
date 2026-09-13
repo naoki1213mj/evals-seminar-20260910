@@ -81,6 +81,8 @@ try {
     resultFile,
     `${JSON.stringify(
       {
+        model: result.model,
+        provider: result.provider,
         generation_success: result.generationSuccess,
         slides: result.slides,
         slide_text: result.slideText,

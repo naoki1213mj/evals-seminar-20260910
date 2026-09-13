@@ -20,9 +20,7 @@ from agent_model import run_agent_process
 from dataset import build_dataset_rows
 from scorers import (
     JUDGE_MODEL,
-    SlideQualityScorer,
-    hallucination_free,
-    summarization,
+    build_scorers,
     tool_correctness,
 )
 
@@ -76,8 +74,9 @@ class FakePresetScorer:
 
 async def test_summarization_maps_arguments(monkeypatch):
     fake = FakePresetScorer()
-    monkeypatch.setattr(scorers_module, "_summarization", fake)
-    result = await summarization(output=SUCCESS_OUTPUT, source_text="本文テキスト")
+    scorer = build_scorers()[1]
+    monkeypatch.setattr(scorer, "_preset", fake)
+    result = await scorer.score(output=SUCCESS_OUTPUT, source_text="本文テキスト")
     assert result == {"passed": True, "reason": "fake"}
     assert fake.calls == [
         {"input": "本文テキスト", "output": SUCCESS_OUTPUT["slide_text"]}
@@ -86,8 +85,9 @@ async def test_summarization_maps_arguments(monkeypatch):
 
 async def test_summarization_skips_judge_without_slide_text(monkeypatch):
     fake = FakePresetScorer()
-    monkeypatch.setattr(scorers_module, "_summarization", fake)
-    result = await summarization(output=FAILED_OUTPUT, source_text="本文テキスト")
+    scorer = build_scorers()[1]
+    monkeypatch.setattr(scorer, "_preset", fake)
+    result = await scorer.score(output=FAILED_OUTPUT, source_text="本文テキスト")
     assert result["passed"] is False
     assert result["failure_reason"] == FAILED_OUTPUT["failure_reason"]
     assert fake.calls == []
@@ -95,8 +95,9 @@ async def test_summarization_skips_judge_without_slide_text(monkeypatch):
 
 async def test_hallucination_free_maps_arguments(monkeypatch):
     fake = FakePresetScorer()
-    monkeypatch.setattr(scorers_module, "_hallucination_free", fake)
-    result = await hallucination_free(output=SUCCESS_OUTPUT, source_text="本文テキスト")
+    scorer = build_scorers()[2]
+    monkeypatch.setattr(scorer, "_preset", fake)
+    result = await scorer.score(output=SUCCESS_OUTPUT, source_text="本文テキスト")
     assert result == {"passed": True, "reason": "fake"}
     assert fake.calls == [
         {"context": "本文テキスト", "output": SUCCESS_OUTPUT["slide_text"]}
@@ -105,8 +106,9 @@ async def test_hallucination_free_maps_arguments(monkeypatch):
 
 async def test_hallucination_free_skips_judge_without_slide_text(monkeypatch):
     fake = FakePresetScorer()
-    monkeypatch.setattr(scorers_module, "_hallucination_free", fake)
-    result = await hallucination_free(output=FAILED_OUTPUT, source_text="本文テキスト")
+    scorer = build_scorers()[2]
+    monkeypatch.setattr(scorer, "_preset", fake)
+    result = await scorer.score(output=FAILED_OUTPUT, source_text="本文テキスト")
     assert result["passed"] is False
     assert fake.calls == []
 
@@ -132,7 +134,7 @@ async def test_slide_quality_scorer_normalizes_score_and_passes(monkeypatch):
         )
 
     monkeypatch.setattr(scorers_module.litellm, "acompletion", fake_acompletion)
-    scorer = SlideQualityScorer(judge_model=JUDGE_MODEL)
+    scorer = build_scorers()[3]
     result = await scorer.score(output=SUCCESS_OUTPUT, source_text="本文テキスト")
     assert result == {"score": 0.7, "passed": True, "reason": "流れが論理的"}
     assert captured["model"] == JUDGE_MODEL
@@ -149,14 +151,14 @@ async def test_slide_quality_scorer_fails_below_threshold(monkeypatch):
         )
 
     monkeypatch.setattr(scorers_module.litellm, "acompletion", fake_acompletion)
-    scorer = SlideQualityScorer(judge_model=JUDGE_MODEL)
+    scorer = build_scorers()[3]
     result = await scorer.score(output=SUCCESS_OUTPUT, source_text="本文テキスト")
     assert result["score"] == 0.4
     assert result["passed"] is False
 
 
 async def test_slide_quality_scorer_keeps_prompt_and_model_as_attributes():
-    scorer = SlideQualityScorer(judge_model=JUDGE_MODEL)
+    scorer = build_scorers()[3]
     assert scorer.judge_model == JUDGE_MODEL
     assert scorer.threshold == 0.5
     assert "{slide_text}" in scorer.prompt
@@ -170,7 +172,7 @@ async def test_slide_quality_scorer_propagates_judge_error(monkeypatch):
         raise RuntimeError("judge API error")
 
     monkeypatch.setattr(scorers_module.litellm, "acompletion", failing_acompletion)
-    scorer = SlideQualityScorer(judge_model=JUDGE_MODEL)
+    scorer = build_scorers()[3]
     with pytest.raises(RuntimeError, match="judge API error"):
         await scorer.score(output=SUCCESS_OUTPUT, source_text="本文テキスト")
 
@@ -180,7 +182,7 @@ async def test_slide_quality_scorer_skips_judge_without_slide_text(monkeypatch):
         raise AssertionError("judgeを呼んではいけない")
 
     monkeypatch.setattr(scorers_module.litellm, "acompletion", failing_acompletion)
-    scorer = SlideQualityScorer(judge_model=JUDGE_MODEL)
+    scorer = build_scorers()[3]
     result = await scorer.score(output=FAILED_OUTPUT, source_text="本文テキスト")
     assert result["passed"] is False
 
@@ -215,7 +217,7 @@ async def test_apply_and_log_scorer_binds_class_scorer_self(monkeypatch):
 
     monkeypatch.setattr(scorers_module.litellm, "acompletion", fake_acompletion)
     prediction = FakePrediction()
-    scorer = SlideQualityScorer(judge_model=JUDGE_MODEL)
+    scorer = build_scorers()[3]
 
     await run_eval_module.apply_and_log_scorer(
         prediction=prediction,
@@ -292,9 +294,10 @@ def _install_fake_subprocess(monkeypatch, tmp_path, *, returncode=0, on_start=No
     monkeypatch.setattr(agent_model, "WORKSPACES_DIR", tmp_path)
     started = {}
 
-    async def fake_exec(*argv, cwd=None):
+    async def fake_exec(*argv, cwd=None, env=None):
         args = {argv[i]: argv[i + 1] for i in range(2, len(argv) - 1, 2)}
         started.update(args)
+        started["env"] = env
         if on_start is not None:
             on_start(tmp_path, args)
         return FakeProcess(returncode=returncode)
@@ -315,11 +318,20 @@ def _write_result(tmp_path, args, payload, *, timestamp="20260812000000"):
     )
 
 
-async def test_run_agent_process_reads_result(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
+        {"provider": "foundry", "model": "agent-deployment"},
+    ],
+)
+async def test_run_agent_process_reads_result(monkeypatch, tmp_path, metadata):
+    payload = {**VALID_RESULT, **metadata}
     _install_fake_subprocess(
         monkeypatch,
         tmp_path,
-        on_start=lambda base, args: _write_result(base, args, VALID_RESULT),
+        on_start=lambda base, args: _write_result(base, args, payload),
     )
     result = await run_agent_process(
         variant="baseline",
@@ -327,7 +339,7 @@ async def test_run_agent_process_reads_result(monkeypatch, tmp_path):
         paper_url="https://arxiv.org/abs/1706.03762",
         eval_context=EVAL_CONTEXT,
     )
-    assert result == VALID_RESULT
+    assert result == payload
 
 
 async def test_run_agent_process_forwards_eval_context(monkeypatch, tmp_path):
@@ -343,6 +355,61 @@ async def test_run_agent_process_forwards_eval_context(monkeypatch, tmp_path):
         eval_context=EVAL_CONTEXT,
     )
     assert json.loads(started["--eval-context"]) == EVAL_CONTEXT
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "foundry"])
+async def test_model_forwards_its_bound_configuration_to_the_child(
+    monkeypatch, tmp_path, provider
+):
+    from model_config import ModelConfig
+
+    config = ModelConfig(
+        provider=provider,
+        agent_model="bound-agent",
+        judge_model="bound-judge",
+        endpoint="https://bound-resource.openai.azure.com/openai/v1/",
+        api_key="bound-offline-key",
+    )
+    model = agent_model.SlideAgentModel.configured(variant="baseline", config=config)
+    started = _install_fake_subprocess(
+        monkeypatch,
+        tmp_path,
+        on_start=lambda base, args: _write_result(base, args, VALID_RESULT),
+    )
+    monkeypatch.setenv("LLM_PROVIDER", "unrelated-provider")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "unrelated-key")
+    monkeypatch.setenv("FOUNDRY_API_KEY", "unrelated-key")
+    await model.predict(
+        arxiv_id="offline-paper",
+        paper_url="https://example.invalid/offline-paper",
+        eval_context=EVAL_CONTEXT,
+    )
+    environment = started["env"]
+    assert environment["LLM_PROVIDER"] == provider
+    if provider == "foundry":
+        assert environment["FOUNDRY_ENDPOINT"] == config.endpoint
+        assert environment["FOUNDRY_AGENT_DEPLOYMENT"] == config.agent_model
+        assert environment["FOUNDRY_API_KEY"] == config.api_key
+    else:
+        assert environment["OPENROUTER_AGENT_MODEL"] == config.agent_model
+        assert environment["OPENROUTER_API_KEY"] == config.api_key
+    assert config.api_key not in model.model_dump_json()
+
+
+async def test_restored_model_rejects_runtime_settings_for_another_model():
+    model = agent_model.SlideAgentModel(
+        variant="baseline",
+        provider="foundry",
+        agent_model="different-agent",
+        judge_model="different-judge",
+        endpoint="https://different-resource.openai.azure.com/openai/v1/",
+    )
+    with pytest.raises(ValueError, match="do not match this Weave Model"):
+        await model.predict(
+            arxiv_id="offline-paper",
+            paper_url="https://example.invalid/offline-paper",
+            eval_context=EVAL_CONTEXT,
+        )
 
 
 async def test_run_agent_process_raises_on_nonzero_exit(monkeypatch, tmp_path):
@@ -414,7 +481,7 @@ def test_load_settings_prefers_wandb_entity_and_project(monkeypatch):
     monkeypatch.setenv("WANDB_PROJECT", "test-project")
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
 
-    settings = dataset_module.load_settings(require_openrouter=True)
+    settings = dataset_module.load_settings(require_model=True)
 
     assert settings.weave_project == "test-entity/test-project"
 
@@ -426,7 +493,7 @@ def test_load_settings_defaults_wandb_project(monkeypatch):
     monkeypatch.delenv("WANDB_PROJECT", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
-    settings = dataset_module.load_settings(require_openrouter=False)
+    settings = dataset_module.load_settings(require_model=False)
 
     assert settings.weave_project == f"test-entity/{dataset_module.DATASET_NAME}"
 
@@ -440,7 +507,7 @@ def test_load_settings_requires_wandb_entity(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     with pytest.raises(SystemExit) as excinfo:
-        dataset_module.load_settings(require_openrouter=False)
+        dataset_module.load_settings(require_model=False)
 
     assert "WANDB_ENTITY" in str(excinfo.value)
 

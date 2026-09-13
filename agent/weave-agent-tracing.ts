@@ -9,6 +9,7 @@ import type {
   Usage as WeaveUsage,
 } from "weave";
 import { z } from "zod";
+import type { LlmProvider } from "./model-provider";
 import { isWeaveAgentTraceActive } from "./weave-client";
 
 const MAX_TRACE_TEXT_LENGTH = 50_000;
@@ -16,6 +17,7 @@ const MAX_TRACE_TEXT_LENGTH = 50_000;
 export interface WeaveTraceContext {
   turn: Turn;
   model: string;
+  provider: LlmProvider;
 }
 
 export const weaveTraceContextSchema = z
@@ -37,6 +39,7 @@ interface StreamableAgent {
 interface TraceOptions {
   agentName: string;
   model: string;
+  provider: LlmProvider;
   variant: string;
   entrypoint: "cli" | "ui" | "eval";
   attributes?: Record<string, string | number | boolean>;
@@ -193,31 +196,35 @@ function toWeaveUsage(response: AIMessage): WeaveUsage {
   };
 }
 
-/** OpenRouterがusageへ返す実課金情報をLLM spanのcustom attributesへ写す。 */
-export function toOpenRouterUsageAttributes(
+/** Record common token usage, and actual OpenRouter charges only on that provider. */
+export function toModelUsageAttributes(
   response: AIMessage,
+  provider: LlmProvider,
 ): Record<string, number> {
   const usage = response.response_metadata?.usage;
-  if (!usage || typeof usage !== "object") {
-    return {};
-  }
-
-  const raw = usage as Record<string, unknown>;
+  const raw = usage && typeof usage === "object" ? usage : {};
   const attributes: Record<string, number> = {};
+  const rawTotalTokens = "total_tokens" in raw ? raw.total_tokens : undefined;
   const totalTokens =
-    raw.total_tokens ?? response.usage_metadata?.total_tokens;
-  const cost = raw.cost;
+    rawTotalTokens ?? response.usage_metadata?.total_tokens;
   if (typeof totalTokens === "number" && Number.isFinite(totalTokens)) {
     attributes["gen_ai.usage.total_tokens"] = totalTokens;
   }
+  if (provider !== "openrouter") {
+    return attributes;
+  }
+  const cost = "cost" in raw ? raw.cost : undefined;
   if (typeof cost === "number" && Number.isFinite(cost)) {
     attributes["openrouter.usage.cost"] = cost;
   }
 
-  const costDetails = raw.cost_details;
-  if (costDetails && typeof costDetails === "object") {
-    const upstream = (costDetails as Record<string, unknown>)
-      .upstream_inference_cost;
+  const costDetails = "cost_details" in raw ? raw.cost_details : undefined;
+  if (
+    costDetails &&
+    typeof costDetails === "object" &&
+    "upstream_inference_cost" in costDetails
+  ) {
+    const upstream = costDetails.upstream_inference_cost;
     if (typeof upstream === "number" && Number.isFinite(upstream)) {
       attributes["openrouter.usage.upstream_inference_cost"] = upstream;
     }
@@ -280,7 +287,7 @@ export function createWeaveAgentTraceMiddleware() {
         const systemInstructions = contentToText(request.systemMessage?.content);
         const llm = trace.turn.startLLM({
           model: trace.model,
-          providerName: "openrouter",
+          providerName: trace.provider === "foundry" ? "azure" : "openrouter",
           systemInstructions: systemInstructions ? [systemInstructions] : [],
         });
         let caughtError: Error | undefined;
@@ -297,7 +304,7 @@ export function createWeaveAgentTraceMiddleware() {
                 ? response.response_metadata.model_name
                 : undefined,
           });
-          llm.setAttributes(toOpenRouterUsageAttributes(response));
+          llm.setAttributes(toModelUsageAttributes(response, trace.provider));
           return response;
         } catch (error) {
           caughtError = toError(error);
@@ -385,6 +392,7 @@ export function wrapAgentWithWeaveTracing<TAgent extends StreamableAgent>(
           attributes: {
             variant: options.variant,
             entrypoint: options.entrypoint,
+            model_provider: options.provider,
             ...(options.attributes ?? {}),
           },
         });
@@ -409,6 +417,7 @@ export function wrapAgentWithWeaveTracing<TAgent extends StreamableAgent>(
             weaveTrace: {
               turn: trace.turn,
               model: options.model,
+              provider: options.provider,
             } satisfies WeaveTraceContext,
           },
         });

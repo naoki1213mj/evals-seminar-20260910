@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as loadDotenv } from "dotenv";
-import { AGENT_MODEL } from "../agent/agent";
+import { VARIANTS } from "../app/variants";
 import { createRunWorkspace } from "../agent/run-workspace";
 import { flushWeaveAgentTrace } from "../agent/weave-client";
 import { runSlideAgent } from "./runner";
@@ -14,7 +14,7 @@ loadDotenv({ path: path.join(ROOT, ".env"), quiet: true });
 const [arxivId, variant = "baseline"] = process.argv.slice(2);
 if (!arxivId) {
   console.error(
-    "Usage: npm run agent -- <arxivId> [baseline|improvement-1|improvement-2]",
+    `Usage: npm run agent -- <arxivId> [${VARIANTS.join("|")}]`,
   );
   process.exit(1);
 }
@@ -43,7 +43,8 @@ try {
       {
         arxivId,
         variant,
-        model: AGENT_MODEL,
+        model: result.model,
+        provider: result.provider,
         messages: result.messages,
         toolCalls: result.toolCalls,
         slides: result.slides,

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import { AGENT_MODEL, createSlideAgent } from "../agent/agent";
+import { createSlideAgent } from "../agent/agent";
+import type { LlmProvider } from "../agent/model-provider";
 import {
   buildConversationId,
   type EvaluationTraceContext,
@@ -35,6 +36,8 @@ export interface RunSlideAgentOptions {
 }
 
 export interface RunSlideAgentResult {
+  model: string;
+  provider: LlmProvider;
   generationSuccess: boolean;
   slides: SlideData | null;
   slideText: string;
@@ -121,13 +124,14 @@ export async function runSlideAgent(
   options: RunSlideAgentOptions,
 ): Promise<RunSlideAgentResult> {
   await initWeaveAgentTrace();
-  const { agent: rawAgent, backend } = await createSlideAgent(
+  const { agent: rawAgent, backend, modelName, provider } = await createSlideAgent(
     options.workspaceDir,
   );
   const threadId = crypto.randomUUID();
   const agent = wrapAgentWithWeaveTracing(rawAgent, {
     agentName: "slide-generator",
-    model: AGENT_MODEL,
+    model: modelName,
+    provider,
     variant: options.variant,
     entrypoint: options.entrypoint ?? "cli",
     attributes: {
@@ -182,6 +186,8 @@ export async function runSlideAgent(
 
     const generationSuccess = slides !== undefined;
     return {
+      model: modelName,
+      provider,
       generationSuccess,
       slides: slides ?? null,
       slideText: slides ? slidesToText(slides) : "",

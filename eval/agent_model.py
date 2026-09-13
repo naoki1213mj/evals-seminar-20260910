@@ -9,10 +9,12 @@ run workspaceへ書かれたevaluation-result.jsonを読み取ってModel出力�
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import weave
+from model_config import ModelConfig, load_model_config
+from pydantic import PrivateAttr
 
 ROOT = Path(__file__).resolve().parents[1]
 TSX_BIN = ROOT / "node_modules" / ".bin" / "tsx"
@@ -36,6 +38,7 @@ async def run_agent_process(
     arxiv_id: str,
     paper_url: str,
     eval_context: dict[str, Any],
+    model_config: ModelConfig | None = None,
 ) -> dict:
     """TypeScriptエージェントを評価試行内で1回実行し、結果ファイルを読む。"""
     run_id = uuid4().hex
@@ -55,6 +58,7 @@ async def run_agent_process(
         "--eval-context",
         json.dumps(eval_context, ensure_ascii=False),
         cwd=ROOT,
+        env=model_config.agent_environment() if model_config is not None else None,
     )
     try:
         returncode = await asyncio.wait_for(
@@ -93,6 +97,17 @@ async def run_agent_process(
 
 class SlideAgentModel(weave.Model):
     variant: str
+    provider: Literal["openrouter", "foundry"]
+    agent_model: str
+    judge_model: str
+    endpoint: str
+    _runtime_config: ModelConfig | None = PrivateAttr(default=None)
+
+    @classmethod
+    def configured(cls, *, variant: str, config: ModelConfig) -> "SlideAgentModel":
+        model = cls(variant=variant, **config.metadata())
+        model._runtime_config = config
+        return model
 
     @weave.op()
     async def predict(
@@ -101,9 +116,17 @@ class SlideAgentModel(weave.Model):
         paper_url: str,
         eval_context: dict[str, Any],
     ) -> dict:
+        config = self._runtime_config or load_model_config()
+        if any(
+            getattr(self, name) != value for name, value in config.metadata().items()
+        ):
+            raise ValueError(
+                "Runtime provider/model settings do not match this Weave Model."
+            )
         return await run_agent_process(
             variant=self.variant,
             arxiv_id=arxiv_id,
             paper_url=paper_url,
             eval_context=eval_context,
+            model_config=config,
         )

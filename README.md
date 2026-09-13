@@ -12,14 +12,14 @@ arXiv論文からスライドを生成するエージェントを題材に、W&B
 
 以下を準備してください。
 
-- OpenRouter APIキー（エージェント実行: `deepseek/deepseek-v4-flash`、評価judge: `openai/gpt-5.4`）
+- OpenRouter APIキー（既定。エージェント実行: `deepseek/deepseek-v4-flash`、評価judge: `openai/gpt-5.4`）、またはMicrosoft Foundryの推論エンドポイント・APIキー・モデルデプロイ
 - W&B APIキーと自分のW&B entity（Weaveを主題とするため、本ハンズオンでは必須です）
 - [Visual Studio Code](docs/setup/install-vscode.md)
 - Node.jsと`uv`が使える実行環境（次の方法A・方法Bのどちらかでインストール）
 
 ### 方法A: Dev Containerを使う
 
-Visual Studio CodeのDev Containers拡張機能を使い、コンテナ内に開発環境を構築します。コンテナの起動時にNode.jsと`uv`が自動でインストールされます。
+Visual Studio CodeのDev Containers拡張機能を使い、コンテナ内に開発環境を構築します。コンテナの起動時にNode.jsと`uv`が自動でインストールされます。教材ではnpmを使うため、追加のpnpmインストールは省略します。
 
 1. [Dockerをインストールする](docs/setup/install-docker.md)
 2. [Dev Containers拡張機能をインストールする](docs/setup/install-devcontainer.md)
@@ -28,6 +28,16 @@ Visual Studio CodeのDev Containers拡張機能を使い、コンテナ内に開
 
 1. [Node.js](https://nodejs.org/)（v22以上）をインストールします
 2. [uv](https://docs.astral.sh/uv/getting-started/installation/)をインストールします
+
+### Microsoft管理デバイスのパッケージフィード
+
+本フォークの`.npmrc`は、会社指定のCFSフィード`https://packagefeedproxy.microsoft.io/npm/`を使用します。Dev ContainerのDockerfileでも同じフィードを設定し、Featureのインストール時と実行時の両方に適用します。lockfileに残るnpmjsの配布URLも、npmの`replace-registry-host`設定で承認済みフィードへ向けます。
+
+キャッシュは`.npm-cfs`へ分離し、既存の公開レジストリ用キャッシュを流用しません。コンテナではこのキャッシュも専用volumeへ保存します。CFSが保留・拒否したパッケージは公開レジストリや別ミラーから取得せず、会社の承認された例外プロセスに従ってください。TLSの証明書検証も無効化しません。
+
+Pythonは`pyproject.toml`の既定インデックスに、承認済みの`https://packagefeedproxy.microsoft.io/pypi/simple/`を指定します。公開PyPIへのフォールバックは使用しません。Dev Containerのuv・pipもこのフィードを既定とし、uvのキャッシュは`/home/vscode/.cache/uv-cfs`に分離します。`uv.lock`の配布元も承認済みフィードへ合わせるため、古いlockfileの公開配布URLをそのまま使わないでください。
+
+公開する`uv.lock`の配布URLには、組織・フィード固有の識別子を含まないCFSの`/pypi/download/`エンドポイントを使用します。再生成後に内部配布URLが入った場合は、固定バージョンとSHA-256ハッシュを維持してこの形式へ正規化し、URLの動作と機密情報の混入がないことを確認してからコミットしてください。
 
 ## セットアップ
 
@@ -49,11 +59,12 @@ code .
 > 通知をクリックするか、コマンドパレットから「Dev Containers: Reopen in Container」を実行します。
 > 初回起動時はコンテナのビルドに数分かかります。完了すると、コンテナ内の開発環境でVisual Studio Codeが開きます。
 > Dev Containerを使用する場合、以降のコマンドは、コンテナ内のターミナルで実行してください。
+> `node_modules`・`.venv`・`.next`はコンテナ専用のDocker volumeへ保存し、Windows側の依存関係やビルド出力とは共有しません。uvが管理するLinux版Pythonも専用volumeに保持します。コンテナ内でも次の依存関係インストールを実行してください。アプリの3000番ポートはホストの`127.0.0.1`にだけ公開します。
 
 3. 依存関係をインストールします。
 
 ```bash
-npm install
+npm ci
 uv sync
 ```
 
@@ -66,16 +77,48 @@ cp .env.sample .env
 作成した `.env` を開き、各値を自分のキーに書き換えます。
 
 ```env
+LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=your_openrouter_api_key_here
 WANDB_API_KEY=your_wandb_api_key_here
 WANDB_ENTITY=your_wandb_entity_here
 WANDB_PROJECT=evals-seminar-20260910
 ```
 
-- `OPENROUTER_API_KEY`: エージェント実行と評価judgeの両方で使用（OpenRouter経由でdeepseek-v4-flashとopenai/gpt-5.4を呼び出す）
+- `LLM_PROVIDER`: `openrouter`（省略時も同じ）または`foundry`。生成と評価judgeの両方を切り替える
+- `OPENROUTER_API_KEY`: OpenRouter使用時のエージェント実行と評価judgeの両方で使用
+- `OPENROUTER_AGENT_MODEL` / `OPENROUTER_JUDGE_MODEL`: OpenRouterのモデルID。省略時はそれぞれ`deepseek/deepseek-v4-flash` / `openai/gpt-5.4`。`openrouter/`プレフィックスは付けない
 - `WANDB_API_KEY`: WeaveへのAgent Trace送信と評価の記録に使用
 - `WANDB_ENTITY`: Dataset・Evaluation・Traceの記録先となるW&B entity
 - `WANDB_PROJECT`: Dataset・Evaluation・Traceの記録先となるW&B project（省略時は `evals-seminar-20260910`）
+
+### Microsoft Foundryを使用する場合
+
+`.env`の`LLM_PROVIDER`を`foundry`にし、次を設定します。W&Bの設定は共通です。`OPENROUTER_API_KEY`は不要です。
+
+```env
+LLM_PROVIDER=foundry
+FOUNDRY_ENDPOINT=https://YOUR-RESOURCE-NAME.services.ai.azure.com/openai/v1/
+FOUNDRY_API_KEY=your_foundry_api_key_here
+FOUNDRY_AGENT_DEPLOYMENT=your_agent_deployment_here
+FOUNDRY_JUDGE_DEPLOYMENT=your_judge_deployment_here
+```
+
+- `FOUNDRY_ENDPOINT`: OpenAI互換v1の**モデル推論エンドポイント**。`https://YOUR-RESOURCE-NAME.openai.azure.com`形式のリソースURLも指定でき、`/openai/v1/`を自動補完する。`/api/projects/...`形式のプロジェクトエンドポイントは指定しない
+- `FOUNDRY_API_KEY`: 対象リソースのAPIキー。本教材のFoundry対応はAPIキー認証を使用する
+- `FOUNDRY_AGENT_DEPLOYMENT`: ツール呼び出し・ストリーミング対応モデルの**デプロイ名**
+- `FOUNDRY_JUDGE_DEPLOYMENT`: **JSON Schemaによる構造化出力・JSON modeの両方**と、論文本文を扱えるコンテキスト長を持つ採点モデルの**デプロイ名**。Web UIのみを動かす場合は不要
+
+同じモデルデプロイを生成と採点に指定することもできます。必要なデプロイ・クォータはあらかじめFoundry側で用意してください。この設定ではエージェント本体はローカルで実行し、推論だけをFoundryへ送ります。
+
+Foundryの採点では、推論モデルとの互換性のため`temperature`を送信せず、プリセットの出力上限を`max_completion_tokens`で指定します（要約1024、事実性4096）。推論トークンもこの枠を使うモデルでは、出力が途切れないか注意してください。
+
+切り替え後は`npm run dev`を再起動し、新しい会話で実行してください。CLIと評価は次の起動から設定が反映されます。Datasetのpublishには、どちらのLLMプロバイダーの設定も不要です。
+
+APIキーは`.env`にだけ保存し、Gitへコミットしないでください。Foundry使用時はAzure側の利用料金が発生します。OpenRouter固有の実課金値はFoundryのTraceへ記録しません。
+
+教材と異なるモデルを選ぶと評価結果も変わります。スキルの効果を比較するときは、3つのvariantでプロバイダー・生成モデル・採点モデルを揃えてください。
+
+参考: [Microsoft FoundryのOpenAI互換v1 API](https://learn.microsoft.com/azure/foundry/openai/api-version-lifecycle)
 
 ## Web UIでの動作確認
 
@@ -116,6 +159,10 @@ UIでスライドが生成されると、PPTX本体もWeaveの`trace_presentatio
 - `baseline`：スキルはワークフローの機構のみ（取得手順・JSON形式・枚数・確認フロー）
 - `improvement-1`：スライド設計ガイドを追加（詰め込み禁止・主張型タイトル・論理的な流れ）
 - `improvement-2`：保存前の事実確認を追加（本文照合・一般化禁止・照合できない数値は書かない）
+
+このフォークでは、ハンズオン後の追加実験として`improvement-3`も選択できます。`improvement-2`を基に、タイトルを含む数値・母集団・単位・比較対象と短い原文根拠を別の`*.evidence.json`へ記録し、保存後に照合する手順を追加しています。元の3設定と採点基準は変更していません。追加実験は`uv run eval/run_eval.py improvement-3`で実行できます。
+
+`improvement-3`は採用済みの改善ではなく、プロンプトだけで根拠確認を促す実験です。2026-09-14のGPT-5.4による3論文・各1回の試行では、改善2より採点は向上せず、根拠台帳1件にJSON構文エラーがありました。生成ツールは台帳の形式・根拠の妥当性を強制検証しません。スライド生成の成功を、台帳の正しさや事実性の保証として扱わないでください。
 
 ### エージェントのCLIでの実行
 
@@ -167,7 +214,7 @@ uv run eval/run_eval.py baseline
 | Hallucination Free | `hallucination_free` | プリセット`HallucinationFreeScorer`への移譲 |
 | Slide Quality      | `SlideQualityScorer` | 自作class-based scorer（LLM-as-a-judge）    |
 
-scorerは数値だけでなく判定理由も返し、Weave上でDataset・Model・scorerのバージョンとともに記録されます。LLM-as-a-judgeのモデルはlitellm経由の`openrouter/openai/gpt-5.4`です。
+scorerは数値だけでなく判定理由も返し、Weave上でDataset・Model・scorerのバージョンとともに記録されます。LLM-as-a-judgeはlitellm経由で、既定では`openrouter/openai/gpt-5.4`、Foundry使用時は`FOUNDRY_JUDGE_DEPLOYMENT`を呼び出します。
 
 ### 3. オフライン評価（改善後）
 
@@ -187,7 +234,7 @@ uv run eval/run_eval.py improvement-2
 
 各Dataset行の実行時に、`EvaluationLogger.log_prediction()`が発行した`weave.eval.run_id`と`weave.eval.predict_and_score_call_id`をTypeScriptエージェントへ渡します。これらの属性はモデル呼び出し・ツール呼び出し・SubAgent呼び出しを含む全Agent spanへ記録されるため、Evaluation詳細の「View spans」から対応するAgent Traceを直接調査できます。
 
-LLM spanにはOpenRouter応答のinput/output/reasoning/cache token usageを記録し、`gen_ai.usage.total_tokens`とOpenRouterが返す実課金値`openrouter.usage.cost`も保存します。Model出力の`conversation_id`（`<variant>:<thread_id>`形式）はAgents画面のconversation IDにも対応しています。
+LLM spanには選択したプロバイダーとモデル、応答に含まれるinput/output/reasoning/cache token usage、`gen_ai.usage.total_tokens`を記録します。OpenRouter使用時は、応答に含まれる実課金値`openrouter.usage.cost`も保存します。Model出力の`conversation_id`（`<variant>:<thread_id>`形式）はAgents画面のconversation IDにも対応しています。
 
 ## Self-improvementへの導入
 

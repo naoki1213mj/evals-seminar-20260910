@@ -4,7 +4,7 @@ import {
   copilotRuntimeNextJSAppRouterEndpoint,
 } from "@copilotkit/runtime";
 import { LangChainAgentAdapter } from "langchain-copilotkit";
-import { AGENT_MODEL, createSlideAgent } from "../../../agent/agent";
+import { createSlideAgent } from "../../../agent/agent";
 import { createRunWorkspace } from "../../../agent/run-workspace";
 import { wrapAgentWithWeaveTracing } from "../../../agent/weave-agent-tracing";
 import { initWeaveAgentTrace } from "../../../agent/weave-client";
@@ -29,11 +29,13 @@ async function buildConversationAgent(
   runId: string,
 ): Promise<ConversationAgent> {
   const workspaceDir = createRunWorkspace(variant, runId);
-  const { agent: rawAgent } = await createSlideAgent(workspaceDir);
+  const { agent: rawAgent, modelName, provider } =
+    await createSlideAgent(workspaceDir);
   // backendはcloseしない(現行同様、devサーバーのプロセス終了に任せる)
   return wrapAgentWithWeaveTracing(rawAgent, {
     agentName: "slide-generator",
-    model: AGENT_MODEL,
+    model: modelName,
+    provider,
     variant,
     entrypoint: "ui",
   });

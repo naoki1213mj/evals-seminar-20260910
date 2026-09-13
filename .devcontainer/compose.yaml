@@ -1,6 +1,43 @@
 services:
   app:
-    image: mcr.microsoft.com/devcontainers/base:bookworm
+    build:
+      context: .
+      dockerfile: Dockerfile
     command: sleep infinity
     volumes:
       - ..:/workspaces/workspace:cached
+      # Keep Linux dependencies separate from Windows installations in the worktree.
+      - type: volume
+        source: node-modules
+        target: /workspaces/workspace/node_modules
+        volume:
+          nocopy: true
+      - type: volume
+        source: python-venv
+        target: /workspaces/workspace/.venv
+        volume:
+          nocopy: true
+      - type: volume
+        source: npm-cfs-cache
+        target: /workspaces/workspace/.npm-cfs
+        volume:
+          nocopy: true
+      - type: volume
+        source: next-build
+        target: /workspaces/workspace/.next
+        volume:
+          nocopy: true
+      - type: volume
+        source: uv-python
+        target: /home/vscode/.local/share/uv/python
+        volume:
+          nocopy: true
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  node-modules:
+  python-venv:
+  npm-cfs-cache:
+  next-build:
+  uv-python:
